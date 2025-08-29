@@ -184,6 +184,37 @@ Register 2: {{ 1 if states("binary_sensor.motion") == 'on' else 0 }}
 - Check baudrate, parity, and stop bits match master configuration
 - Monitor Home Assistant logs for detailed error messages
 
+## Hardware Requirements
+
+### Recommended Setup: Raspberry Pi 4 + USB to Modbus Adapter
+
+This integration has been tested and works well with:
+- **Raspberry Pi 4** running Home Assistant OS/Supervised
+- **USB to Modbus RTU RS485 converter**
+
+### USB to Modbus Adapters
+
+You'll need a USB to RS485 converter to connect Modbus RTU devices. Recommended options:
+
+**Budget Option:**
+- [WITMOTION USB to RS485 Converter](https://www.amazon.com/WITMOTION-RS485-Converter-Terminated-Adapter/dp/B07VMFJ5Y3) (~$15-20)
+  - CH340 chip, 1m cable with 4-way socket
+  - Compatible with Windows, Linux, Mac OS
+
+**Professional/Isolated Options:**
+- [Q-USB-485 from Qeed USA](https://www.qeedusa.com/usb-to-modbus-rs485-q-usb-485.html)
+  - 5kV isolation for industrial environments
+  - Better protection from electrical surges
+
+- [US Converters USB to RS485](https://www.usconverters.com/usb-rs485-converter-xs885)
+  - FTDI chipset for reliability
+  - Professional grade construction
+
+### Connection Tips
+- Connect RS485 A/B terminals to your Modbus master device
+- USB adapter typically appears as `/dev/ttyUSB0` on Raspberry Pi
+- Ensure proper termination resistors on RS485 network
+
 ## Dependencies
 
 - **pyserial**: Serial communication library
