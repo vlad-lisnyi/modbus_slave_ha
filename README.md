@@ -109,9 +109,10 @@ Configure bidirectional communication by specifying where master writes should b
 
 ### Examples
 ```yaml
-# Update climate mode when master writes
+# Read climate mode (template result mapped to numeric)
+Template: {{ states("climate.office") }}
+Value Mapping: {"off": 0, "heat": 1, "cool": 2, "auto": 3}
 Write Target: climate.office
-Value Mapping: {"0": "off", "1": "heat", "2": "cool", "3": "auto"}
 
 # Update target temperature attribute
 Write Target: climate.office.target_temperature  
@@ -150,9 +151,9 @@ Master reads register 100 to get room temperature × 10
 
 ### 2. HVAC Control
 ```yaml
-Template: {{ 0 if states("climate.office") == 'off' else 1 }}
+Template: {{ states("climate.office") }}
+Value Mapping: {"off": 0, "heat": 1, "cool": 2}
 Write Target: climate.office
-Value Mapping: {"0": "off", "1": "heat", "2": "cool"}
 Register: 200
 Slave ID: 15
 ```

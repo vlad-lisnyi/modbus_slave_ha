@@ -30,6 +30,13 @@ async def async_setup_entry(hass, config_entry):
             "baudrate": baudrate,
         }
     
+    # Check for duplicate slave_id + register_addr combinations
+    for existing_entry_id, existing_entry in hass.data[DOMAIN]["entries"].items():
+        if (existing_entry["slave_id"] == slave_id and 
+            existing_entry["register_addr"] == register_addr and 
+            existing_entry_id != entry_id):
+            _LOGGER.warning(f"Duplicate register detected: Slave {slave_id} Reg {register_addr} already exists in entry {existing_entry_id}")
+    
     write_target = data.get("write_target")
     hass.data[DOMAIN]["entries"][entry_id] = {
         "slave_id": slave_id,
@@ -38,6 +45,7 @@ async def async_setup_entry(hass, config_entry):
         "write_target": write_target,
         "template_tracker": None,
         "value_map": value_map,
+        "template_str": template_str,
     }
 
     template = Template(template_str, hass)
@@ -50,10 +58,16 @@ async def async_setup_entry(hass, config_entry):
         
         for result in updates:
             if result.result is not None:
-                entry_value_map = hass.data[DOMAIN]["entries"][entry_id].get("value_map")
-                value = parse_template_result(result.result, entry_value_map)
-                hass.data[DOMAIN]["entries"][entry_id]["value"] = value
-                _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}')")
+                # Check if result is an error message string containing template errors
+                result_str = str(result.result)
+                if any(error in result_str for error in ["TypeError:", "ValueError:", "NameError:", "AttributeError:"]):
+                    hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
+                    _LOGGER.warning(f"Template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
+                else:
+                    entry_value_map = hass.data[DOMAIN]["entries"][entry_id].get("value_map")
+                    value = parse_template_result(result.result, entry_value_map)
+                    hass.data[DOMAIN]["entries"][entry_id]["value"] = value
+                    _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}')")
             else:
                 hass.data[DOMAIN]["entries"][entry_id]["value"] = 0  # Entity unavailable fallback
                 _LOGGER.warning(
@@ -62,19 +76,41 @@ async def async_setup_entry(hass, config_entry):
 
     template_unsubscribe = async_track_template_result(hass, [track_template], template_listener)
     hass.data[DOMAIN]["entries"][entry_id]["template_tracker"] = template_unsubscribe
+    
+    # Get initial template value immediately
+    try:
+        initial_result = template.async_render()
+        if initial_result is not None:
+            # Check if result is an error message string containing template errors
+            result_str = str(initial_result)
+            if any(error in result_str for error in ["TypeError:", "ValueError:", "NameError:", "AttributeError:"]):
+                hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
+                _LOGGER.warning(f"Initial template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
+            else:
+                value = parse_template_result(initial_result, value_map)
+                hass.data[DOMAIN]["entries"][entry_id]["value"] = value
+                _LOGGER.info(f"Initial value for Slave {slave_id} Reg {register_addr}: {value} (from '{initial_result}')")
+        else:
+            hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
+            _LOGGER.warning(f"Initial template unavailable for Slave {slave_id} Reg {register_addr}. Using 0.")
+    except Exception as e:
+        hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
+        _LOGGER.warning(f"Error evaluating initial template for Slave {slave_id} Reg {register_addr}: {e}. Using 0.")
 
     # Initialize serial connection and task
     if hass.data[DOMAIN]["serial_connection"] is None:
         try:
-            serial_conn = await hass.async_add_executor_job(
-                serial.Serial,
-                hass.data[DOMAIN]["serial_port"],
-                hass.data[DOMAIN]["baudrate"],
-                timeout=1,
-                parity='N',
-                stopbits=2,
-                bytesize=8
-            )
+            def create_serial_connection():
+                return serial.Serial(
+                    port=hass.data[DOMAIN]["serial_port"],
+                    baudrate=hass.data[DOMAIN]["baudrate"],
+                    timeout=1,
+                    parity='N',
+                    stopbits=2,
+                    bytesize=8
+                )
+            
+            serial_conn = await hass.async_add_executor_job(create_serial_connection)
             hass.data[DOMAIN]["serial_connection"] = serial_conn
             hass.data[DOMAIN]["serial_task"] = hass.async_create_task(
                 modbus_slave_handler(hass, serial_conn)
@@ -109,7 +145,7 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
     register_addr = entry_data["register_addr"]
     
     # Stop old template tracker
-    if entry_data["template_tracker"]:
+    if entry_data["template_tracker"] and callable(entry_data["template_tracker"]):
         entry_data["template_tracker"]()
     
     # Update write target and value map
@@ -127,10 +163,16 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
         
         for result in updates:
             if result.result is not None:
-                entry_value_map = hass.data[DOMAIN]["entries"][entry_id].get("value_map")
-                value = parse_template_result(result.result, entry_value_map)
-                hass.data[DOMAIN]["entries"][entry_id]["value"] = value
-                _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}')")
+                # Check if result is an error message string containing template errors
+                result_str = str(result.result)
+                if any(error in result_str for error in ["TypeError:", "ValueError:", "NameError:", "AttributeError:"]):
+                    hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
+                    _LOGGER.warning(f"Template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
+                else:
+                    entry_value_map = hass.data[DOMAIN]["entries"][entry_id].get("value_map")
+                    value = parse_template_result(result.result, entry_value_map)
+                    hass.data[DOMAIN]["entries"][entry_id]["value"] = value
+                    _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}')")
             else:
                 hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
                 _LOGGER.warning(
@@ -140,6 +182,26 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
     # Start new template tracker
     template_unsubscribe = async_track_template_result(hass, [track_template], template_listener)
     entry_data["template_tracker"] = template_unsubscribe
+    
+    # Get initial template value immediately after options update
+    try:
+        initial_result = template.async_render()
+        if initial_result is not None:
+            # Check if result is an error message string containing template errors
+            result_str = str(initial_result)
+            if any(error in result_str for error in ["TypeError:", "ValueError:", "NameError:", "AttributeError:"]):
+                entry_data["value"] = 0
+                _LOGGER.warning(f"Initial template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
+            else:
+                value = parse_template_result(initial_result, value_map)
+                entry_data["value"] = value
+                _LOGGER.info(f"Initial value after options update for Slave {slave_id} Reg {register_addr}: {value} (from '{initial_result}')")
+        else:
+            entry_data["value"] = 0
+            _LOGGER.warning(f"Initial template unavailable for Slave {slave_id} Reg {register_addr}. Using 0.")
+    except Exception as e:
+        entry_data["value"] = 0
+        _LOGGER.warning(f"Error evaluating initial template for Slave {slave_id} Reg {register_addr}: {e}. Using 0.")
     
     _LOGGER.info(f"Updated options for Slave {slave_id} Reg {register_addr}")
 
@@ -193,13 +255,27 @@ def parse_template_result(result_value, value_map=None):
     _LOGGER.warning(f"Could not convert template result '{result_value}' to numeric value, using 0")
     return 0
 
-def reverse_value_mapping(numeric_value, value_map=None):
-    """Convert numeric value back to string using reverse mapping."""
+def detect_template_scaling(template_str):
+    """Detect scaling factor from template string (e.g., * 10, * 100)."""
+    import re
+    # Look for multiplication patterns like "* 10", "* 100", "*10", etc.
+    match = re.search(r'\*\s*(\d+)', template_str)
+    if match:
+        return int(match.group(1))
+    return None
+
+def reverse_value_mapping(numeric_value, value_map=None, scaling_factor=None):
+    """Convert numeric value back to string using reverse mapping and scaling."""
+    # Apply reverse scaling if detected
+    if scaling_factor and scaling_factor > 1:
+        numeric_value = numeric_value / scaling_factor
+        _LOGGER.debug(f"Applied reverse scaling: {numeric_value * scaling_factor} / {scaling_factor} = {numeric_value}")
+    
     # If value_map is provided, try reverse lookup
     if value_map and isinstance(value_map, dict):
         for key, value in value_map.items():
             try:
-                if int(float(value)) == numeric_value:
+                if int(float(value)) == int(numeric_value):
                     return str(key)
             except (ValueError, TypeError):
                 continue
@@ -214,7 +290,14 @@ def reverse_value_mapping(numeric_value, value_map=None):
         5: 'fan_only'
     }
     
-    return common_reverse_mappings.get(numeric_value, str(numeric_value))
+    # For scaled values, return as float string if it has decimals
+    if scaling_factor and scaling_factor > 1:
+        if numeric_value != int(numeric_value):
+            return str(numeric_value)
+        else:
+            return str(int(numeric_value))
+    
+    return common_reverse_mappings.get(int(numeric_value), str(int(numeric_value)))
 
 def calc_crc(data):
     """Calculate Modbus RTU CRC16."""
@@ -243,6 +326,8 @@ async def modbus_slave_handler(hass: HomeAssistant, serial_conn):
                 # Read byte using executor to avoid blocking event loop
                 byte = await hass.async_add_executor_job(read_serial_data, serial_conn)
                 if not byte:
+                    # Brief pause when no data available to prevent busy waiting
+                    await asyncio.sleep(0.01)
                     continue
                 
                 buffer += byte
@@ -258,11 +343,15 @@ async def modbus_slave_handler(hass: HomeAssistant, serial_conn):
                         buffer = buffer[1:]
                         continue
 
-                    matched_entry = None
-                    for entry in hass.data[DOMAIN]["entries"].values():
+                    matched_entries = []
+                    for entry_id, entry in hass.data[DOMAIN]["entries"].items():
                         if entry["slave_id"] == req_slave and entry["register_addr"] == addr:
-                            matched_entry = entry
-                            break
+                            matched_entries.append((entry_id, entry))
+                    
+                    if len(matched_entries) > 1:
+                        _LOGGER.warning(f"Found {len(matched_entries)} duplicate entries for Slave {req_slave} Reg {addr}: {[eid for eid, _ in matched_entries]}")
+                    
+                    matched_entry = matched_entries[0][1] if matched_entries else None
 
                     if matched_entry:
                         if func == 3:  # Read Holding Register
@@ -283,7 +372,9 @@ async def modbus_slave_handler(hass: HomeAssistant, serial_conn):
                             write_target = matched_entry.get("write_target")
                             if write_target:
                                 value_map = matched_entry.get("value_map")
-                                await _update_entity_attribute(hass, write_target, value_received, value_map)
+                                template_str = matched_entry.get("template_str", "")
+                                scaling_factor = detect_template_scaling(template_str)
+                                await _update_entity_attribute(hass, write_target, value_received, value_map, scaling_factor)
 
                     buffer = b''  # reset buffer after processing
                     
@@ -301,8 +392,8 @@ async def modbus_slave_handler(hass: HomeAssistant, serial_conn):
         _LOGGER.info("Modbus slave handler stopped")
 
 @callback
-async def _update_entity_attribute(hass: HomeAssistant, write_target: str, value_received: int, value_map=None):
-    """Update entity state or attribute using reverse value mapping."""
+async def _update_entity_attribute(hass: HomeAssistant, write_target: str, value_received: int, value_map=None, scaling_factor=None):
+    """Update entity state or attribute using reverse value mapping and scaling."""
     try:
         if '.' in write_target:
             # Format: entity.attribute - update attribute  
@@ -310,12 +401,12 @@ async def _update_entity_attribute(hass: HomeAssistant, write_target: str, value
             state_obj = hass.states.get(entity_id)
             if state_obj:
                 # Convert numeric value back to string if value mapping exists
-                mapped_value = reverse_value_mapping(value_received, value_map)
+                mapped_value = reverse_value_mapping(value_received, value_map, scaling_factor)
                 
                 attrs = dict(state_obj.attributes)
                 attrs[attr] = mapped_value
                 hass.states.async_set(entity_id, state_obj.state, attrs)
-                _LOGGER.info(f"Updated {entity_id}.{attr} to '{mapped_value}' (from {value_received})")
+                _LOGGER.info(f"Updated {entity_id}.{attr} to '{mapped_value}' (from {value_received}, scaling: {scaling_factor})")
             else:
                 _LOGGER.warning(f"Entity {entity_id} not found in HA")
         else:
@@ -324,7 +415,7 @@ async def _update_entity_attribute(hass: HomeAssistant, write_target: str, value
             state_obj = hass.states.get(entity_id)
             if state_obj:
                 # Convert numeric value back to string if value mapping exists
-                mapped_value = reverse_value_mapping(value_received, value_map)
+                mapped_value = reverse_value_mapping(value_received, value_map, scaling_factor)
                 
                 # For climate entities, use service calls for proper state changes
                 if entity_id.startswith('climate.'):
@@ -332,7 +423,7 @@ async def _update_entity_attribute(hass: HomeAssistant, write_target: str, value
                 else:
                     # For other entities, set state directly
                     hass.states.async_set(entity_id, mapped_value, state_obj.attributes)
-                    _LOGGER.info(f"Updated {entity_id} state to '{mapped_value}' (from {value_received})")
+                    _LOGGER.info(f"Updated {entity_id} state to '{mapped_value}' (from {value_received}, scaling: {scaling_factor})")
             else:
                 _LOGGER.warning(f"Entity {entity_id} not found in HA")
     except Exception as e:
@@ -362,7 +453,7 @@ async def async_unload_entry(hass, entry):
     entry_data = hass.data[DOMAIN]["entries"].get(entry_id)
     
     # Clean up template tracker
-    if entry_data and entry_data.get("template_tracker"):
+    if entry_data and entry_data.get("template_tracker") and callable(entry_data["template_tracker"]):
         entry_data["template_tracker"]()
     
     hass.data[DOMAIN]["entries"].pop(entry_id, None)
