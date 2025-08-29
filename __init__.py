@@ -70,10 +70,10 @@ async def async_setup_entry(hass, config_entry):
                 serial.Serial,
                 hass.data[DOMAIN]["serial_port"],
                 hass.data[DOMAIN]["baudrate"],
-                'N',  # parity
-                2,    # stopbits  
-                8,    # bytesize
-                1     # timeout
+                timeout=1,
+                parity='N',
+                stopbits=2,
+                bytesize=8
             )
             hass.data[DOMAIN]["serial_connection"] = serial_conn
             hass.data[DOMAIN]["serial_task"] = hass.async_create_task(
