@@ -211,25 +211,32 @@ def parse_template_result(result_value, value_map=None):
         return 0
         
     result_str = str(result_value).strip()
+    _LOGGER.debug(f"Parsing template result: '{result_str}' with value_map: {value_map}")
     
     # First try direct numeric conversion
     try:
-        return int(float(result_str))
+        numeric_result = int(float(result_str))
+        _LOGGER.debug(f"Direct numeric conversion successful: {numeric_result}")
+        return numeric_result
     except (ValueError, TypeError):
         pass
     
     # If value_map is provided, try to map string values
     if value_map and isinstance(value_map, dict):
+        _LOGGER.debug(f"Checking custom value_map for '{result_str}'")
         # Try case-insensitive lookup
         for key, value in value_map.items():
             if str(key).lower() == result_str.lower():
                 try:
-                    return int(float(value))
+                    mapped_result = int(float(value))
+                    _LOGGER.debug(f"Custom mapping found: '{key}' -> {mapped_result}")
+                    return mapped_result
                 except (ValueError, TypeError):
                     _LOGGER.warning(f"Value map contains non-numeric value: {key} -> {value}")
                     continue
     
     # If no mapping found, try some common HVAC state mappings
+    _LOGGER.debug(f"No custom mapping found, checking built-in mappings for '{result_str}'")
     common_mappings = {
         'off': 0,
         'heat': 1,
@@ -249,6 +256,7 @@ def parse_template_result(result_value, value_map=None):
     
     mapped_value = common_mappings.get(result_str.lower())
     if mapped_value is not None:
+        _LOGGER.debug(f"Built-in mapping found: '{result_str}' -> {mapped_value}")
         return mapped_value
     
     # Last resort: return 0
@@ -310,7 +318,17 @@ def calc_crc(data):
 
 def read_serial_data(serial_conn):
     """Read data from serial port (blocking operation for executor)."""
-    return serial_conn.read(1)
+    try:
+        # Check if data is available before reading
+        if serial_conn.in_waiting > 0:
+            data = serial_conn.read(1)
+            return data if data else b''
+        else:
+            return b''
+    except Exception as e:
+        # Log the specific error but don't re-raise to avoid spam
+        _LOGGER.debug(f"Serial read error: {e}")
+        return b''
 
 def write_serial_data(serial_conn, data):
     """Write data to serial port (blocking operation for executor)."""
