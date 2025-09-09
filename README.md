@@ -1,239 +1,138 @@
 # Modbus Slave for Home Assistant
 
-A Home Assistant custom integration that implements a Modbus slave device, allowing Home Assistant to respond to Modbus RTU requests over a serial connection.
+A Home Assistant custom integration that lets Home Assistant act as a Modbus RTU slave over a serial port. Each configured entry exposes one Modbus holding register backed by a Home Assistant entity (state or attribute). Optionally, incoming Modbus writes are forwarded to Home Assistant services (e.g., climate.set_temperature).
 
 ## Features
 
-- **Template-based Register Values**: Use Home Assistant templates to dynamically calculate register values
-- **Multi-instance Support**: Configure multiple Modbus slave instances with different slave IDs and register addresses
-- **Bidirectional Communication**: Read register values and optionally write back to Home Assistant entities
-- **Value Mapping**: Convert string states to numeric values using custom or built-in mappings
-- **Real-time Updates**: Register values update automatically when Home Assistant states change
+- Entity/attribute-backed registers with live updates
+- Bi-directional writes using HA services (service + optional payload)
+- Scaling (e.g., °C×10) and string↔number mapping
+- “Use entity state” option when the entity’s state is the value you want
+- Attribute dropdown with value previews to help choose scale/mappings
+- Multiple independent registers, shared serial connection
 
 ## Installation
 
 ### HACS (Recommended)
 1. Add this repository to HACS as a custom repository
-2. Install "Modbus Slave" from HACS
+2. Install “Modbus Slave” from HACS
 3. Restart Home Assistant
 
-### Manual Installation
-1. Copy the `modbus_slave` folder to your `custom_components` directory
+### Manual
+1. Copy the `modbus_slave` folder into `config/custom_components/`
 2. Restart Home Assistant
 
 ## Configuration
 
-Add the integration through the Home Assistant UI:
+Add via UI: Settings → Devices & Services → Add Integration → “Modbus Slave”. Each entry corresponds to one Modbus register.
 
-**Settings** → **Devices & Services** → **Add Integration** → **Modbus Slave**
+The setup wizard has 3 steps:
 
-### Configuration Parameters
+1) Register
+- Serial Port: e.g., `/dev/ttyUSB0`
+- Baudrate: e.g., `9600`
+- Slave ID: `1…247`
+- Register Address: `0…65535`
 
-- **Serial Port**: Path to serial device (e.g., `/dev/ttyUSB0`)
-- **Baudrate**: Serial communication speed (default: 9600)
-- **Slave ID**: Modbus slave identifier (1-247)
-- **Register Address**: Starting register address (0-65535)
-- **Template**: Home Assistant template for register value calculation
-- **Write Target** (optional): Entity or attribute to update when master writes to register
-- **Value Mapping** (optional): JSON mapping for string-to-numeric conversion
+2) Source
+- Direction:
+  - `write_only`: HA → register (master reads only; no HA service calls)
+  - `write_read`: HA ↔ register (on master writes, call a HA service)
+- Read Entity: entity that backs the register (e.g., `climate.bedroom`)
 
-## Template Examples
+3) Details
+- Read Attribute: choose from a dropdown with value previews, or select “Use entity state”.
+- Scale: integer multiplier applied when storing to the register (e.g., `10` → 26.5 → 265).
+- Value Map: optional JSON mapping, e.g. `{ "off": 0, "auto": 1, "heat": 2, "cool": 3 }`.
+- Write Service (write_read only): choose a domain service (e.g., `climate.set_temperature`).
+- Write Entity (optional): defaults to the read entity.
+- Write Payload (optional): JSON body for the service; supports templating (see below).
 
-### Numeric Templates
-```yaml
-# Temperature sensor (multiplied by 10 for precision)
-{{ (state_attr("climate.office", "current_temperature") * 10) | int }}
+### Service payload templating (optional)
+You can template fields inside the payload. Available variables:
+- `value`: raw register value (int)
+- `value_scaled`: scaled float value (e.g., 265 → 26.5 when scale=10)
+- `mapped_value`: reverse-mapped value (e.g., 2 → "heat")
 
-# Humidity sensor
-{{ states("sensor.humidity") | float | int }}
-
-# Power consumption
-{{ states("sensor.power_meter") | float * 100 | int }}
-```
-
-### State-based Templates
-```yaml
-# Climate mode as numeric value
-{{ 0 if states("climate.office") == 'off' else 1 }}
-
-# Multi-state mapping
-{% set mode = states("climate.office") %}
-{% if mode == "off" %}0
-{% elif mode == "heat" %}1  
-{% elif mode == "cool" %}2
-{% elif mode == "auto" %}3
-{% else %}0{% endif %}
-```
-
-### Advanced Templates with Calculations
-```yaml
-# Average of multiple sensors
-{{ ((states("sensor.temp1") | float + states("sensor.temp2") | float) / 2 * 10) | int }}
-
-# Complex logic
-{% set state = states("climate.office") %}
-{% set temp = state_attr("climate.office", "current_temperature") | float %}
-{{ (temp * 10) | int if state != "off" else 0 }}
-```
-
-## Value Mapping
-
-Use JSON format to map string states to numeric values:
-
-### HVAC States
+Example:
 ```json
-{"off": 0, "heat": 1, "cool": 2, "auto": 3, "dry": 4, "fan_only": 5}
+{"temperature": {{ value_scaled }}}
 ```
 
-### Boolean States
-```json
-{"false": 0, "true": 1, "off": 0, "on": 1}
-```
+For common climate services, missing keys are injected automatically when the payload is empty or incomplete:
+- `climate.set_temperature` → adds `temperature: value_scaled` if missing
+- `climate.set_hvac_mode` → adds `hvac_mode: mapped_value`
+- `climate.set_preset_mode` → adds `preset_mode: mapped_value`
 
-### Custom States
-```json
-{"idle": 0, "heating": 1, "cooling": 2, "defrost": 3}
-```
+## Example register definitions
 
-## Write Target Configuration
+1) Current temperature (read-only)
+- Direction: `write_only`
+- Entity: `climate.bedroom`
+- Read: `current_temperature`
+- Scale: `10` (26.5°C ↔ 265)
 
-Configure bidirectional communication by specifying where master writes should be stored:
+2) Target temperature (bi-directional)
+- Direction: `write_read`
+- Entity: `climate.bedroom`
+- Read: `target_temperature`
+- Scale: `10`
+- Write Service: `climate.set_temperature`
+- Write Payload: leave empty (auto-injection)
 
-### Entity State Updates
-- **Target**: `climate.office` - Updates entity state directly
-- **Use case**: Master writing HVAC mode changes
+3) HVAC mode (bi-directional)
+- Direction: `write_read`
+- Entity: `climate.bedroom`
+- Read: `Use entity state` (the entity state is the current mode)
+- Value Map: `{ "off": 0, "auto": 1, "heat": 2, "cool": 3 }`
+- Write Service: `climate.set_hvac_mode`
+- Write Payload: leave empty (auto-injection)
 
-### Entity Attribute Updates  
-- **Target**: `climate.office.target_temperature` - Updates specific attribute
-- **Use case**: Master writing setpoint changes
+4) Door sensor (read-only)
+- Direction: `write_only`
+- Entity: `binary_sensor.front_door`
+- Read: `Use entity state`
+- Value Map: `{ "off": 0, "on": 1 }`
 
-### Examples
-```yaml
-# Read climate mode (template result mapped to numeric)
-Template: {{ states("climate.office") }}
-Value Mapping: {"off": 0, "heat": 1, "cool": 2, "auto": 3}
-Write Target: climate.office
+## Value mapping
 
-# Update target temperature attribute
-Write Target: climate.office.target_temperature  
-Template: {{ state_attr("climate.office", "target_temperature") * 10 | int }}
-```
+Use a JSON object to map strings ↔ numbers. Examples:
+- HVAC modes: `{ "off": 0, "auto": 1, "heat": 2, "cool": 3 }`
+- Booleans: `{ "off": 0, "on": 1, "false": 0, "true": 1 }`
+- Actions: `{ "idle": 0, "heating": 1, "cooling": 2 }`
 
-## Built-in Value Mappings
+## Modbus protocol support
 
-The integration includes common HVAC state mappings:
+- Function 3: Read Holding Registers (quantity=1). Returns the current integer value.
+- Function 6: Write Single Register. Stores the value and (in write_read mode) calls the configured HA service.
+- Protocol: Modbus RTU (CRC16 validated)
 
-| State | Value | State | Value |
-|-------|-------|-------|-------|
-| off | 0 | idle | 0 |
-| heat | 1 | heating | 1 |
-| cool | 2 | cooling | 2 |
-| auto | 3 | false | 0 |
-| dry | 4 | true | 1 |
-| fan_only | 5 | on | 1 |
-
-## Modbus Protocol Support
-
-- **Function Code 3**: Read Holding Registers - Returns template-calculated values
-- **Function Code 6**: Write Single Register - Updates Home Assistant entities
-- **Protocol**: Modbus RTU over serial
-- **CRC**: Full CRC16 validation for data integrity
-
-## Example Use Cases
-
-### 1. Temperature Monitoring
-```yaml
-Template: {{ (states("sensor.room_temperature") | float * 10) | int }}
-Register: 100
-Slave ID: 10
-```
-Master reads register 100 to get room temperature × 10
-
-### 2. HVAC Control
-```yaml
-Template: {{ states("climate.office") }}
-Value Mapping: {"off": 0, "heat": 1, "cool": 2}
-Write Target: climate.office
-Register: 200
-Slave ID: 15
-```
-Master can read current HVAC state and write new modes
-
-### 3. Multi-sensor Dashboard
-```yaml
-# Configure multiple registers for different sensors
-Register 0: {{ states("sensor.temperature") | float * 10 | int }}
-Register 1: {{ states("sensor.humidity") | int }}
-Register 2: {{ 1 if states("binary_sensor.motion") == 'on' else 0 }}
-```
+Notes:
+- Modbus is master-driven: the slave only replies to requests; it does not push frames.
+- If you see several “Sent …” logs in quick succession, your master is polling or retrying.
 
 ## Troubleshooting
 
-### Serial Connection Issues
-- Verify serial device permissions: `sudo chmod 666 /dev/ttyUSB0`
-- Check device availability: `ls -la /dev/tty*`
-- Ensure no other applications are using the serial port
-
-### Template Errors
-- Test templates in Home Assistant Developer Tools → Template
-- Check entity names and attribute availability
-- Verify numeric conversion with `| float | int`
-
-### Modbus Communication
-- Verify CRC calculations with Modbus testing tools
-- Check baudrate, parity, and stop bits match master configuration
-- Monitor Home Assistant logs for detailed error messages
-
-## Hardware Requirements
-
-### Recommended Setup: Raspberry Pi 4 + USB to Modbus Adapter
-
-This integration has been tested and works well with:
-- **Raspberry Pi 4** running Home Assistant OS/Supervised
-- **USB to Modbus RTU RS485 converter**
-
-### USB to Modbus Adapters
-
-You'll need a USB to RS485 converter to connect Modbus RTU devices. Recommended options:
-
-**Budget Option:**
-- [WITMOTION USB to RS485 Converter](https://www.amazon.com/WITMOTION-RS485-Converter-Terminated-Adapter/dp/B07VMFJ5Y3) (~$15-20)
-  - CH340 chip, 1m cable with 4-way socket
-  - Compatible with Windows, Linux, Mac OS
-
-**Professional/Isolated Options:**
-- [Q-USB-485 from Qeed USA](https://www.qeedusa.com/usb-to-modbus-rs485-q-usb-485.html)
-  - 5kV isolation for industrial environments
-  - Better protection from electrical surges
-
-- [US Converters USB to RS485](https://www.usconverters.com/usb-rs485-converter-xs885)
-  - FTDI chipset for reliability
-  - Professional grade construction
-
-### Connection Tips
-- Connect RS485 A/B terminals to your Modbus master device
-- USB adapter typically appears as `/dev/ttyUSB0` on Raspberry Pi
-- Ensure proper termination resistors on RS485 network
+- Attribute choice for climate modes: pick “Use entity state”. The `hvac_modes` attribute is a list of supported modes (not the current one) and can’t be mapped to a single number.
+- Scaling: use value previews in the dropdown to set a correct scale (e.g., `10` for one decimal place).
+- Mapping: ensure your JSON is valid; the UI validates it.
+- Quantity=1: This integration currently replies with a single register for FC3. Configure your master to request quantity=1 for these registers.
+- Serial: check permissions and port. Example: `sudo chmod 666 /dev/ttyUSB0`.
 
 ## Dependencies
 
-- **pyserial**: Serial communication library
-- **Home Assistant Core**: Template system and entity management
+- pyserial
+- Home Assistant Core
 
 ## Contributing
 
-1. Fork the repository
+1. Fork this repository
 2. Create a feature branch
 3. Make your changes
 4. Test thoroughly
-5. Submit a pull request
+5. Open a pull request
 
 ## License
 
-This project is licensed under the MIT License.
+MIT
 
-## Support
-
-- **Issues**: Report bugs and feature requests on GitHub
-- **Discussions**: Join the Home Assistant community forums
-- **Documentation**: Refer to Home Assistant template documentation for advanced usage
