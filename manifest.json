@@ -1,7 +1,7 @@
 {
   "domain": "modbus_slave",
   "name": "Modbus Slave",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "documentation": "",
   "requirements": ["pyserial"],
   "dependencies": [],

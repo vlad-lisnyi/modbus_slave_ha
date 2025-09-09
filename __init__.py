@@ -4,9 +4,26 @@ import serial
 import struct
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
+import json
 from homeassistant.helpers.template import Template
 from homeassistant.helpers.event import async_track_template_result, TrackTemplate
-from .const import DOMAIN, CONF_SERIAL_PORT, CONF_BAUDRATE, CONF_SLAVE_ID, CONF_REGISTER_ADDR, CONF_TEMPLATE, CONF_VALUE_MAP
+from .const import (
+    DOMAIN,
+    CONF_SERIAL_PORT,
+    CONF_BAUDRATE,
+    CONF_SLAVE_ID,
+    CONF_REGISTER_ADDR,
+    CONF_TEMPLATE,
+    CONF_VALUE_MAP,
+    CONF_DIRECTION,
+    CONF_READ_MODE,
+    CONF_READ_ENTITY,
+    CONF_READ_ATTRIBUTE,
+    CONF_SCALE,
+    CONF_WRITE_SERVICE,
+    CONF_WRITE_ENTITY,
+    CONF_WRITE_PAYLOAD,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,8 +33,17 @@ async def async_setup_entry(hass, config_entry):
     baudrate = data[CONF_BAUDRATE]
     slave_id = data[CONF_SLAVE_ID]
     register_addr = data[CONF_REGISTER_ADDR]
-    template_str = data[CONF_TEMPLATE]
+    # New flexible configuration
+    direction = data.get(CONF_DIRECTION, 'read_write')
+    read_mode = data.get(CONF_READ_MODE, 'template')
+    read_entity = data.get(CONF_READ_ENTITY)
+    read_attribute = data.get(CONF_READ_ATTRIBUTE)
+    scale = int(data.get(CONF_SCALE, 1) or 1)
+    template_str = data.get(CONF_TEMPLATE, "{{ 0 }}")
     value_map = data.get(CONF_VALUE_MAP)
+    write_service = data.get(CONF_WRITE_SERVICE)
+    write_entity = data.get(CONF_WRITE_ENTITY)
+    write_payload = data.get(CONF_WRITE_PAYLOAD)
 
     entry_id = config_entry.entry_id
 
@@ -45,10 +71,28 @@ async def async_setup_entry(hass, config_entry):
         "write_target": write_target,
         "template_tracker": None,
         "value_map": value_map,
-        "template_str": template_str,
+        "template_str": None,  # filled below after building from read config
+        "direction": direction,
+        "scale": scale,
+        "read_mode": read_mode,
+        "read_entity": read_entity,
+        "read_attribute": read_attribute,
+        "write_service": write_service,
+        "write_entity": write_entity,
+        "write_payload": write_payload,
     }
 
-    template = Template(template_str, hass)
+    # Build effective template string from config
+    effective_template_str = template_str or "{{ 0 }}"
+    if (read_mode == 'entity' or read_entity) and read_entity:
+        if read_attribute:
+            effective_template_str = f"{{{{ state_attr('{read_entity}', '{read_attribute}') }}}}"
+        else:
+            effective_template_str = f"{{{{ states('{read_entity}') }}}}"
+
+    hass.data[DOMAIN]["entries"][entry_id]["template_str"] = effective_template_str
+
+    template = Template(effective_template_str, hass)
     track_template = TrackTemplate(template, None)
 
     async def template_listener(event, updates):
@@ -64,10 +108,12 @@ async def async_setup_entry(hass, config_entry):
                     hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
                     _LOGGER.warning(f"Template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
                 else:
-                    entry_value_map = hass.data[DOMAIN]["entries"][entry_id].get("value_map")
-                    value = parse_template_result(result.result, entry_value_map)
-                    hass.data[DOMAIN]["entries"][entry_id]["value"] = value
-                    _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}')")
+                    entry_obj = hass.data[DOMAIN]["entries"][entry_id]
+                    entry_value_map = entry_obj.get("value_map")
+                    entry_scale = int(entry_obj.get("scale", 1) or 1)
+                    value = parse_template_result(result.result, entry_value_map, entry_scale)
+                    entry_obj["value"] = value
+                    _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}', scale: {entry_scale})")
             else:
                 hass.data[DOMAIN]["entries"][entry_id]["value"] = 0  # Entity unavailable fallback
                 _LOGGER.warning(
@@ -87,9 +133,9 @@ async def async_setup_entry(hass, config_entry):
                 hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
                 _LOGGER.warning(f"Initial template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
             else:
-                value = parse_template_result(initial_result, value_map)
+                value = parse_template_result(initial_result, value_map, scale)
                 hass.data[DOMAIN]["entries"][entry_id]["value"] = value
-                _LOGGER.info(f"Initial value for Slave {slave_id} Reg {register_addr}: {value} (from '{initial_result}')")
+                _LOGGER.info(f"Initial value for Slave {slave_id} Reg {register_addr}: {value} (from '{initial_result}', scale: {scale})")
         else:
             hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
             _LOGGER.warning(f"Initial template unavailable for Slave {slave_id} Reg {register_addr}. Using 0.")
@@ -97,9 +143,9 @@ async def async_setup_entry(hass, config_entry):
         hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
         _LOGGER.warning(f"Error evaluating initial template for Slave {slave_id} Reg {register_addr}: {e}. Using 0.")
 
-    # Initialize serial connection and task
-    if hass.data[DOMAIN]["serial_connection"] is None:
-        try:
+    # Initialize serial connection and background task
+    try:
+        if hass.data[DOMAIN]["serial_connection"] is None:
             def create_serial_connection():
                 return serial.Serial(
                     port=hass.data[DOMAIN]["serial_port"],
@@ -107,18 +153,32 @@ async def async_setup_entry(hass, config_entry):
                     timeout=1,
                     parity='N',
                     stopbits=2,
-                    bytesize=8
+                    bytesize=8,
                 )
-            
+
             serial_conn = await hass.async_add_executor_job(create_serial_connection)
             hass.data[DOMAIN]["serial_connection"] = serial_conn
-            hass.data[DOMAIN]["serial_task"] = hass.async_create_task(
-                modbus_slave_handler(hass, serial_conn)
-            )
-            _LOGGER.info(f"Started Modbus slave on {hass.data[DOMAIN]['serial_port']}")
-        except Exception as e:
-            _LOGGER.error(f"Failed to initialize serial connection: {e}")
-            return False
+            _LOGGER.info(f"Opened serial port {hass.data[DOMAIN]['serial_port']} at {hass.data[DOMAIN]['baudrate']} baud")
+
+        # Start background handler if not already running
+        task = hass.data[DOMAIN].get("serial_task")
+        if task is None or task.done():
+            serial_conn = hass.data[DOMAIN]["serial_connection"]
+            # Prefer background task to avoid blocking startup
+            if hasattr(hass, "async_create_background_task"):
+                hass.data[DOMAIN]["serial_task"] = hass.async_create_background_task(
+                    modbus_slave_handler(hass, serial_conn), name="modbus_slave_handler"
+                )
+            else:
+                hass.data[DOMAIN]["serial_task"] = hass.async_create_task(
+                    modbus_slave_handler(hass, serial_conn)
+                )
+            _LOGGER.info("Started Modbus slave handler task")
+        else:
+            _LOGGER.debug("Modbus slave handler already running; not starting another")
+    except Exception as e:
+        _LOGGER.error(f"Failed to initialize Modbus slave: {e}")
+        return False
 
     # Set up options update listener
     config_entry.async_on_unload(
@@ -139,6 +199,15 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
     template_str = config_entry.options.get(CONF_TEMPLATE) or config_entry.data.get(CONF_TEMPLATE)
     write_target = config_entry.options.get("write_target") or config_entry.data.get("write_target")
     value_map = config_entry.options.get(CONF_VALUE_MAP) or config_entry.data.get(CONF_VALUE_MAP)
+    # New options
+    direction = config_entry.options.get(CONF_DIRECTION) or config_entry.data.get(CONF_DIRECTION, 'read_write')
+    read_mode = config_entry.options.get(CONF_READ_MODE) or config_entry.data.get(CONF_READ_MODE, 'template')
+    read_entity = config_entry.options.get(CONF_READ_ENTITY) or config_entry.data.get(CONF_READ_ENTITY)
+    read_attribute = config_entry.options.get(CONF_READ_ATTRIBUTE) or config_entry.data.get(CONF_READ_ATTRIBUTE)
+    scale = int(config_entry.options.get(CONF_SCALE) or config_entry.data.get(CONF_SCALE) or 1)
+    write_service = config_entry.options.get(CONF_WRITE_SERVICE) or config_entry.data.get(CONF_WRITE_SERVICE)
+    write_entity = config_entry.options.get(CONF_WRITE_ENTITY) or config_entry.data.get(CONF_WRITE_ENTITY)
+    write_payload = config_entry.options.get(CONF_WRITE_PAYLOAD) or config_entry.data.get(CONF_WRITE_PAYLOAD)
     
     entry_data = hass.data[DOMAIN]["entries"][entry_id]
     slave_id = entry_data["slave_id"]
@@ -148,12 +217,29 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
     if entry_data["template_tracker"] and callable(entry_data["template_tracker"]):
         entry_data["template_tracker"]()
     
-    # Update write target and value map
+    # Update new settings
     entry_data["write_target"] = write_target
     entry_data["value_map"] = value_map
+    entry_data["direction"] = direction
+    entry_data["read_mode"] = read_mode
+    entry_data["read_entity"] = read_entity
+    entry_data["read_attribute"] = read_attribute
+    entry_data["scale"] = scale
+    entry_data["write_service"] = write_service
+    entry_data["write_entity"] = write_entity
+    entry_data["write_payload"] = write_payload
     
     # Create new template and tracker
-    template = Template(template_str, hass)
+    # Build effective template string from config
+    effective_template_str = template_str or "{{ 0 }}"
+    if (read_mode == 'entity' or read_entity) and read_entity:
+        if read_attribute:
+            effective_template_str = f"{{{{ state_attr('{read_entity}', '{read_attribute}') }}}}"
+        else:
+            effective_template_str = f"{{{{ states('{read_entity}') }}}}"
+    entry_data["template_str"] = effective_template_str
+
+    template = Template(effective_template_str, hass)
     track_template = TrackTemplate(template, None)
 
     async def template_listener(event, updates):
@@ -170,9 +256,10 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
                     _LOGGER.warning(f"Template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
                 else:
                     entry_value_map = hass.data[DOMAIN]["entries"][entry_id].get("value_map")
-                    value = parse_template_result(result.result, entry_value_map)
+                    entry_scale = int(hass.data[DOMAIN]["entries"][entry_id].get("scale", 1) or 1)
+                    value = parse_template_result(result.result, entry_value_map, entry_scale)
                     hass.data[DOMAIN]["entries"][entry_id]["value"] = value
-                    _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}')")
+                    _LOGGER.info(f"Updated Slave {slave_id} Reg {register_addr}: {value} (from '{result.result}', scale: {entry_scale})")
             else:
                 hass.data[DOMAIN]["entries"][entry_id]["value"] = 0
                 _LOGGER.warning(
@@ -193,9 +280,9 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
                 entry_data["value"] = 0
                 _LOGGER.warning(f"Initial template error for Slave {slave_id} Reg {register_addr}: {result_str}. Using 0.")
             else:
-                value = parse_template_result(initial_result, value_map)
+                value = parse_template_result(initial_result, value_map, scale)
                 entry_data["value"] = value
-                _LOGGER.info(f"Initial value after options update for Slave {slave_id} Reg {register_addr}: {value} (from '{initial_result}')")
+                _LOGGER.info(f"Initial value after options update for Slave {slave_id} Reg {register_addr}: {value} (from '{initial_result}', scale: {scale})")
         else:
             entry_data["value"] = 0
             _LOGGER.warning(f"Initial template unavailable for Slave {slave_id} Reg {register_addr}. Using 0.")
@@ -205,19 +292,26 @@ async def async_update_options(hass: HomeAssistant, config_entry: config_entries
     
     _LOGGER.info(f"Updated options for Slave {slave_id} Reg {register_addr}")
 
-def parse_template_result(result_value, value_map=None):
-    """Parse template result into numeric value, supporting string-to-numeric mapping."""
+def parse_template_result(result_value, value_map=None, scale: int = 1):
+    """Parse template result into register numeric value.
+
+    Behavior:
+    - If result is numeric: apply scale (multiply) and return int(round(...)).
+    - Else if mapping provided: map string to int without scaling.
+    - Else try built-in mappings; otherwise 0.
+    """
     if result_value is None:
         return 0
         
     result_str = str(result_value).strip()
-    _LOGGER.debug(f"Parsing template result: '{result_str}' with value_map: {value_map}")
+    _LOGGER.debug(f"Parsing template result: '{result_str}' with value_map: {value_map}, scale: {scale}")
     
     # First try direct numeric conversion
     try:
-        numeric_result = int(float(result_str))
-        _LOGGER.debug(f"Direct numeric conversion successful: {numeric_result}")
-        return numeric_result
+        numeric = float(result_str)
+        numeric_scaled = int(round(numeric * (scale if scale and scale > 1 else 1)))
+        _LOGGER.debug(f"Direct numeric conversion successful: {numeric} -> scaled: {numeric_scaled}")
+        return numeric_scaled
     except (ValueError, TypeError):
         pass
     
@@ -386,13 +480,34 @@ async def modbus_slave_handler(hass: HomeAssistant, serial_conn):
                             await hass.async_add_executor_job(write_serial_data, serial_conn, response)
                             _LOGGER.info(f"Received {value_received} from Master (Slave {req_slave} Reg {addr})")
 
-                            # Update entity/property using thread-safe method
-                            write_target = matched_entry.get("write_target")
-                            if write_target:
-                                value_map = matched_entry.get("value_map")
-                                template_str = matched_entry.get("template_str", "")
-                                scaling_factor = detect_template_scaling(template_str)
-                                await _update_entity_attribute(hass, write_target, value_received, value_map, scaling_factor)
+                            # Respect direction: only act on writes if allowed
+                            direction = matched_entry.get("direction", 'read_write')
+                            if direction in ('write_only', 'read_write', 'write_read'):
+                                # Prefer configured service if present
+                                write_service = matched_entry.get("write_service")
+                                if write_service:
+                                    try:
+                                        value_map = matched_entry.get("value_map")
+                                        scale = int(matched_entry.get("scale", 1) or 1)
+                                        value_scaled = float(value_received) / float(scale) if scale and scale > 1 else float(value_received)
+                                        mapped_value = reverse_value_mapping(value_received, value_map, scale)
+                                        variables = {
+                                            'value': value_received,
+                                            'value_scaled': value_scaled,
+                                            'mapped_value': mapped_value,
+                                        }
+                                        entity = matched_entry.get("write_entity") or matched_entry.get("read_entity")
+                                        payload_tmpl = matched_entry.get("write_payload")
+                                        await _call_configured_service(hass, write_service, entity, payload_tmpl, variables)
+                                    except Exception as e:
+                                        _LOGGER.error(f"Error calling configured service '{write_service}': {e}")
+                                else:
+                                    # Fallback to legacy write_target behavior
+                                    write_target = matched_entry.get("write_target")
+                                    if write_target:
+                                        value_map = matched_entry.get("value_map")
+                                        scale = int(matched_entry.get("scale", 1) or 1)
+                                        await _update_entity_attribute(hass, write_target, value_received, value_map, scale)
 
                     buffer = b''  # reset buffer after processing
                     
@@ -408,6 +523,55 @@ async def modbus_slave_handler(hass: HomeAssistant, serial_conn):
         if serial_conn.is_open:
             await hass.async_add_executor_job(serial_conn.close)
         _LOGGER.info("Modbus slave handler stopped")
+
+async def _call_configured_service(hass: HomeAssistant, domain_service: str, entity: str | None, payload_template: str | None, variables: dict):
+    """Call a HA service given as 'domain.service', rendering a JSON payload template.
+
+    variables provided to the template:
+    - value: raw register value (int)
+    - value_scaled: scaled numeric value (float)
+    - mapped_value: reverse-mapped string or number
+    """
+    try:
+        if not domain_service or '.' not in domain_service:
+            raise ValueError("write_service must be in form 'domain.service'")
+        domain, service = domain_service.split('.', 1)
+
+        service_data = {}
+        rendered_str = None
+        if payload_template:
+            rendered = Template(str(payload_template), hass).async_render(variables)
+            rendered_str = rendered if isinstance(rendered, str) else str(rendered)
+            if rendered_str and rendered_str.strip():
+                try:
+                    service_data = json.loads(rendered_str)
+                except json.JSONDecodeError as je:
+                    _LOGGER.error(f"write_payload is not valid JSON after rendering: {je}. Rendered: {rendered_str}")
+                    service_data = {}
+
+        # Ensure entity_id is present if provided
+        if entity and 'entity_id' not in service_data:
+            service_data['entity_id'] = entity
+
+        # Fallback defaults for common services if payload omitted or missing keys
+        try:
+            if domain == 'climate':
+                if service == 'set_temperature':
+                    if not any(k in service_data for k in ('temperature', 'target_temp_high', 'target_temp_low')):
+                        service_data['temperature'] = variables.get('value_scaled')
+                elif service == 'set_hvac_mode':
+                    if 'hvac_mode' not in service_data and variables.get('mapped_value') is not None:
+                        service_data['hvac_mode'] = str(variables.get('mapped_value')).lower()
+                elif service == 'set_preset_mode':
+                    if 'preset_mode' not in service_data and variables.get('mapped_value') is not None:
+                        service_data['preset_mode'] = str(variables.get('mapped_value')).lower()
+        except Exception as e:
+            _LOGGER.debug(f"Error applying service defaults: {e}")
+
+        await hass.services.async_call(domain, service, service_data)
+        _LOGGER.info(f"Called service {domain}.{service} with {service_data} (rendered: {rendered_str})")
+    except Exception as e:
+        _LOGGER.error(f"Failed to call service {domain_service}: {e}")
 
 @callback
 async def _update_entity_attribute(hass: HomeAssistant, write_target: str, value_received: int, value_map=None, scaling_factor=None):
